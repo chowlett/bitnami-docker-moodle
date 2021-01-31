@@ -88,7 +88,7 @@ The solution is to set MOODLE_DATABASE_MIN_VERSION=5.7.12
 2021-01-31T11:21:58.045-05:00   !!
 ```
 
-It appears that moodle is issuing 224 "CREATE TABLE" statements, generated from an xml file that can be found in the container at /bitnami/moodle/lib/db/install.xml. There is a copy of this file in this repo at /debugging-artefacts/install.xml. The last logged statement (moodle app log) is that last table in this list so maybe the failure is on the commit of a big transaction. The Aurora logs show only the first CREATE TABLE, then a couple of queries on the metadata for mdl_upgrade_log (the second table of the 224), then a couple of disconnects. It looks like moodle initialization is throwing the exception based on what it is seeing, not as the result of a database error.
+It appears that moodle is issuing 224 "CREATE TABLE" statements, generated from an xml file that can be found in the container at /bitnami/moodle/lib/db/install.xml. There is a copy of this file in this repo at /debugging-artefacts/install.xml. The last logged statement (moodle app log) is that last table in this list so maybe the failure is on the commit of a big transaction. The Aurora logs show only the first CREATE TABLE, then a couple of queries on the metadata for mdl_upgrade_log (the second table of the 224), then a couple of disconnects.
 
 ```
 /aws/rds/cluster/moodle-staging/audit moodle-staging.audit.log.0.2021-01-31-18-39.0.1 1612119892307921,moodle-staging_1526730431,ss_dbuser,10.1.15.240,8,8136,QUERY,moodle_staging,'CREATE TABLE mdl_config (     id BIGINT(10) NOT NULL auto_increment,     name VARCHAR(255) COLLATE utf8mb4_general_ci NOT NULL DEFAULT \'\',     value LONGTEXT COLLATE utf8mb4_general_ci NOT NULL, CONSTRAINT  PRIMARY KEY (id) , UNIQUE KEY mdl_conf_nam_uix (name) )  ENGINE = InnoDB  DEFAULT COLLATE = utf8mb4_general_ci ROW_FORMAT=Compressed  COMMENT=\'Moodle configuration variables\' ',1709
@@ -100,7 +100,7 @@ It appears that moodle is issuing 224 "CREATE TABLE" statements, generated from 
 
 The file throwing the exception is /bitnami/moodle/lib/dml/mysqli_native_moodle_database.php. There is a copy of this file in this repo at /debugging-artefacts/mysqli_native_moodle_database.php.
 
-After this error, there are no tables in the database. As if a transaction commit failed. Or as if only one CREATE TABLE was issued (the first table) and it failed. Or as if only one CREATE TABLE was issued and it work but moodle incorrectly concluded there was a problem (with mdl_upgrade_log?).
+After this error, there are no tables in the database.
 
 ### Resolution
 
@@ -127,4 +127,67 @@ Moodle executes the 224 TABLE CREATE statements as a batch then must check mdl_u
 
 Workarounds described here: https://stackoverflow.com/questions/45043269/moodle-with-amazon-aurora-index-column-size-too-large-the-maximum-column-size
 
-It looks like the problem is row format "compressed" as described in the above. See https://dev.mysql.com/doc/refman/5.7/en/innodb-row-format.html. All moodle_staging database parameters support index sizes of 3072 (instead of 767) by default. But setting the row format to "compressed" overrides this and sets the limit to 767. Not sure why this is only a problem for Aurora. Maybe MySQL doesn't honour "compressed" the same way. Anyway, if you drop the "ROW_FORMAT=Compressed" from the CREATE TABLE for mdl_config, it works correctly.
+It looks like the problem is row format "Compressed" as described in the above. See https://dev.mysql.com/doc/refman/5.7/en/innodb-row-format.html.
+
+Here are the values of the relevant MySQL parameers:
+
+```
++---------------------------+-----------+
+| Variable_name             | Value     |
++---------------------------+-----------+
+| innodb_default_row_format | dynamic   |
+| innodb_file_format        | Barracuda |
+| innodb_file_format_check  | ON        |
+| innodb_file_format_max    | Barracuda |
+| innodb_file_per_table     | ON        |
+| innodb_large_prefix       | ON        |
++--------------------------+------------+
+```
+
+With these parameters, row formats "Dynamic" and "Compressed" should both support large_prefixes, that is, index sizes of up to 3072. However Aurora serverless seems not to honour this for "Compressed". That looks like a bug.
+
+Aurora serverless experiments with the MySQL command line:
+
+**ROW_FORMAT=Compressed**
+
+```
+mysql> CREATE TABLE mdl_config (
+    ->     id BIGINT(10) NOT NULL auto_increment,
+    ->     name VARCHAR(255) COLLATE utf8mb4_general_ci NOT NULL DEFAULT '',
+    ->     value LONGTEXT COLLATE utf8mb4_general_ci NOT NULL,
+    -> CONSTRAINT  PRIMARY KEY (id)
+    -> , UNIQUE KEY mdl_conf_nam_uix (name)
+    -> )
+    ->  ENGINE = InnoDB
+    ->  DEFAULT COLLATE = utf8mb4_general_ci ROW_FORMAT=Compressed
+    ->  COMMENT='Moodle configuration variables'
+    -> ;
+ERROR 1709 (HY000): Index column size too large. The maximum column size is 767 bytes.
+```
+
+**ROW_FORMAT=Dynamic**
+
+```
+mysql> CREATE TABLE mdl_config (
+    ->     id BIGINT(10) NOT NULL auto_increment,
+    ->     name VARCHAR(255) COLLATE utf8mb4_general_ci NOT NULL DEFAULT '',
+    ->     value LONGTEXT COLLATE utf8mb4_general_ci NOT NULL,
+    -> CONSTRAINT  PRIMARY KEY (id)
+    -> , UNIQUE KEY mdl_conf_nam_uix (name)
+    -> )
+    ->  ENGINE = InnoDB
+    ->  DEFAULT COLLATE = utf8mb4_general_ci ROW_FORMAT=Dynamic
+    ->  COMMENT='Moodle configuration variables'
+    -> ;
+Query OK, 0 rows affected (0.07 sec)
+```
+
+Omitting ROW_FORMAT acts like "ROW_FORMAT=Dynamic", as expected.
+
+### Workaround
+
+`sed` mysqli_native_moodle_database.php to change the appropriate occurences of "Compressed" to "Dynamic". This has to be done at run time because this source file is downloaded at run time. The simplest way turns out to be
+
+```
+sed -i 's/compressedrowformatsupported = true/compressedrowformatsupported = false/' mysqli_native_moodle_database.php
+```
