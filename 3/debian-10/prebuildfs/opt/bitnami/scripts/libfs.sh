@@ -126,6 +126,8 @@ relativize() {
 #   None
 #########################
 configure_permissions_ownership() {
+    info "Entering configure_permissions_ownership $*"
+    info `whoami`
     local -r paths="${1:?paths is missing}"
     local dir_mode=""
     local file_mode=""
@@ -162,22 +164,33 @@ configure_permissions_ownership() {
 
     read -r -a filepaths <<< "$paths"
     for p in "${filepaths[@]}"; do
+        info "Processing $p"
+#        ls -al $p
         if [[ -e "$p" ]]; then
             if [[ -n $dir_mode ]]; then
+                info "Updating directory permissions"
+#                find -L "$p" -type d -exec ls -al {} \;
                 find -L "$p" -type d -exec chmod "$dir_mode" {} \;
             fi
             if [[ -n $file_mode ]]; then
+                info "Updating file permissions"
+#                find -L "$p" -type f -exec ls -al {} \;
                 find -L "$p" -type f -exec chmod "$file_mode" {} \;
             fi
             if [[ -n $user ]] && [[ -n $group ]]; then
+                info "Updating ownership for user and group"
                 chown -LR "$user":"$group" "$p"
             elif [[ -n $user ]] && [[ -z $group ]]; then
+                info "Updating ownership for user"
                 chown -LR "$user" "$p"
             elif [[ -z $user ]] && [[ -n $group ]]; then
+                info "Updating ownership for group"
                 chgrp -LR "$group" "$p"
             fi
         else
             stderr_print "$p does not exist"
         fi
     done
+
+    info "Leaving configure_permissions_ownership"
 }

@@ -109,10 +109,14 @@ moodle_initialize() {
     if ! is_app_initialized "$app_name"; then
         # Ensure Moodle persisted directories exist (i.e. when a volume has been mounted to /bitnami)
         info "Ensuring Moodle directories exist"
+        info `whoami`
+        info "`am_i_root`"
         for dir in "$MOODLE_VOLUME_DIR" "$MOODLE_DATA_DIR"; do
             ensure_dir_exists "$dir"
             # Use daemon:root ownership for compatibility when running as a non-root user
+            info "Initializing $dir"
             am_i_root && configure_permissions_ownership "$dir" -d "775" -f "664" -u "$WEB_SERVER_DAEMON_USER" -g "root"
+            info "$dir initialized"
         done
 
         info "Trying to connect to the database server"
@@ -260,6 +264,7 @@ moodle_wait_for_mysql_db_connection() {
 #   true if the script succeeded, false otherwise
 #########################
 moodle_install() {
+    info "Entering moodle_install()"
     local -r http_port="${WEB_SERVER_HTTP_PORT_NUMBER:-"$WEB_SERVER_DEFAULT_HTTP_PORT_NUMBER"}"
     local -a moodle_install_args=(
         "${PHP_BIN_DIR}/php"
@@ -279,6 +284,7 @@ moodle_install() {
         "$@"
     )
     # HACK: Change database version check for Azure Database for MariaDB
+    echo "MOODLE_DATABASE_MIN_VERSION: $MOODLE_DATABASE_MIN_VERSION"
     ! is_empty_value "$MOODLE_DATABASE_MIN_VERSION" && moodle_fix_manageddb_check
     pushd "$MOODLE_BASE_DIR" >/dev/null
     # Run as web server user to avoid having to change permissions/ownership afterwards
